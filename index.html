@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alumni Scanner G10 - Specification Fixed</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
+        .console-font { font-family: 'Menlo', 'Monaco', 'Courier New', monospace; font-size: 10px; }
+        .preview-scroll::-webkit-scrollbar { height: 4px; }
+        .preview-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        /* version 7
+         * 【確定要件定義リスト】
+         * 1. APIモデル: gemini-3-flash-preview (変更不可)
+         * 2. サムネイル表示: 解析実行前にプレビューを必ず出す (必須)
+         * 3. 別名編集: 画像管理モードでalias編集可能にする (必須)
+         * 4. DB名: AlumniScanner_Normalized_DB (変更不可)
+         * 5. APIキー: 設定画面から入力（プログラム内埋め込みは空欄とする） (Version 6 変更)
+         * 6. 運用ルール: 今後の修正は、ロジック、HTML、インデント、変数名、メッセージなどプログラムの構成要素すべてにおいて、依頼内容以外の修正を行わないこと。
+         * 7. (金曜日時点の変更ピックアップ):
+         * - 顔認識のトリミングマージン調整 (margin = 0.4)
+         * - IndexedDBによる永続化の実装
+         * - ローカル画像プレビュー機能
+         * 8. (追加要件):
+         * - 解析失敗（0人）の画像のみを抽出して再解析する機能の追加
+         * 9. (不具合修正):
+         * - 顔写真のサムネイルが歪む（ストレッチされる）問題を修正
+         * 10. (機能追加):
+         * - 画像管理画面にて、AliasとともにOriginal Filename (Value.Id) を表示するように修正
+         * 11. (Version 3 変更点):
+         * - IndexedDBのimage保存時に originalFileName 属性を追加 (インポート時のファイル名)
+         * - 画像管理画面で Alias と originalFileName を併記 (ID表示を廃止)
+         * - 名簿画面の表示を Alias > originalFileName > Value.Id の優先順位で表示
+         * 12. (Version 4 変更点):
+         * - 名簿の名前とふりがなを編集可能に変更（onBlurによる実装）
+         * 13. (Version 5 変更点):
+         * - 管理者メンテナンス機能（インポート/エクスポート、APIキー動的設定）を追加
+         * - APIキー未設定時は解析・画像追加機能を非表示にする
+         * - 初回起動時の初期データ自動インポート機能を実装
+         * 14. (Version 6 変更点):
+         * - APIキーの埋め込み値を空欄に変更
+         * - 「画像を追加」ボタン、Selected Image欄、Log欄の表示を「画像管理モード」時のみに限定
+         * 15. (Version 7 変更点):
+         * - checkAndAutoImportメソッドにて initial_data.json からの自動インポート処理を実装 (GitHub Pages対応)
+         */
+
+        const { useState, useRef, useEffect, useMemo } = React;
+
+        // [FIXED] API KEY: メンテナンス機能導入に伴い空欄化
+        const API_KEY = ""; 
+
+        // [FIXED] DB NAME: AlumniScanner_Normalized_DB 以外禁止
+        const DB_NAME = "AlumniScanner_Normalized_DB";
+
+        // [FIXED] DB_VERSION: バージョン2 (変更不可)
+        const DB_VERSION = 2; 
+
+        // [FIXED] API URL & MODEL: 変更不可。gemini-3-flash-preview を使用すること
+        const MODEL_ID = "gemini-3-flash-preview"; 
+        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_ID}:generateContent?key=${API_KEY}`;
+
+        const STORE_IMAGES = "images"; 
+        const STORE_PEOPLE = "people"; 
+
+        const App = () => {
+            const [results, setResults] = useState([]);
+            const [imagePool, setImagePool] = useState({}); 
+            const [loading, setLoading] = useState(false);
+            const [logs, setLogs] = useState([{ type: 'system', msg: 'System Ready with G3-Flash.' }]);
+            const [searchQuery, setSearchQuery] = useState("");
+            const [selectedFiles, setSelectedFiles] = useState([]);
+            const [viewMode, setViewMode] = useState('people'); 
+            const [sortMode, setSortMode] = useState('reading'); 
+            // [Version 5] UI State
+            const [customApiKey, setCustomApiKey] = useState(localStorage.getItem('AS_API_KEY') || "");
+            
+            const fileInputRef = useRef(null);
+            const maintenanceInputRef = useRef(null);
+
+            const addLog = (msg, type = 'info') => {
+                setLogs(prev => [{ type, msg, time: new Date().toLocaleTimeString() }, ...prev].slice(0, 50));
+            };
+
+            const loadDataFromDB = (db) => {
+                const tx = db.transaction([STORE_IMAGES, STORE_PEOPLE], "readonly");
+                tx.objectStore(STORE_IMAGES).getAll().onsuccess = (e) => {
+                    const imgs = e.target.result || [];
+                    const cache = {};
+                    imgs.forEach(img => cache[img.id] = img);
+                    setImagePool(cache);
+                };
+                tx.objectStore(STORE_PEOPLE).getAll().onsuccess = (e) => {
+                    setResults(e.target.result || []);
+                };
+            };
+
+            // [Version 5 & 7] 初期データ自動インポート機能 (initial_data.json対応)
+            const checkAndAutoImport = async (db) => {
+                const tx = db.transaction([STORE_IMAGES], "readonly");
+                tx.objectStore(STORE_IMAGES).count().onsuccess = async (e) => {
+                    if (e.target.result === 0) {
+                        addLog("No data found. Checking for initial_data.json...", "info");
+                        // [Version 7] 同ディレクトリの initial_data.json を取得して自動インポート
+                        try {
+                            const response = await fetch('initial_data.json');
+                            if (!response.ok) {
+                                addLog("initial_data.json not found. Skipping auto-import.", "info");
+                                return;
+                            }
+                            const imported = await response.json();
+                            if (imported.images && imported.people) {
+                                const writeTx = db.transaction([STORE_IMAGES, STORE_PEOPLE], "readwrite");
+                                imported.images.forEach(img => writeTx.objectStore(STORE_IMAGES).put(img));
+                                imported.people.forEach(p => writeTx.objectStore(STORE_PEOPLE).put(p));
+                                writeTx.oncomplete = () => {
+                                    loadDataFromDB(db);
+                                    addLog(`Auto-imported ${imported.images.length} images and ${imported.people.length} records.`, "success");
+                                };
+                            }
+                        } catch (err) {
+                            addLog(`Auto-import failed: ${err.message}`, "error");
+                        }
+                    }
+                };
+            };
+
+            useEffect(() => {
+                const request = indexedDB.open(DB_NAME, DB_VERSION);
+                request.onupgradeneeded = (e) => {
+                    const db = e.target.result;
+                    if (!db.objectStoreNames.contains(STORE_IMAGES)) db.createObjectStore(STORE_IMAGES, { keyPath: "id" });
+                    if (!db.objectStoreNames.contains(STORE_PEOPLE)) db.createObjectStore(STORE_PEOPLE, { keyPath: "id" });
+                };
+                request.onsuccess = (e) => {
+                    const db = e.target.result;
+                    addLog(`Connected to DB: ${DB_NAME} (v${DB_VERSION})`, "success");
+                    loadDataFromDB(db);
+                    checkAndAutoImport(db);
+                };
+            }, []);
+
+            const fetchWithRetry = async (payload, maxRetries = 5) => {
+                // [Version 5] 動的APIキー優先
+                const activeKey = customApiKey || API_KEY;
+                const dynamicUrl = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_ID}:generateContent?key=${activeKey}`;
+                
+                let delay = 1000;
+                for (let i = 0; i < maxRetries; i++) {
+                    const response = await fetch(dynamicUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (response.status === 429) {
+                        addLog(`API Busy (429). Retrying in ${delay/1000}s...`, "warn");
+                        await new Promise(r => setTimeout(r, delay));
+                        delay *= 2; continue;
+                    }
+                    if (!response.ok) throw new Error(`API Error: ${response.status}`);
+                    return await response.json();
+                }
+                throw new Error("Retries exhausted.");
+            };
+
+            const runAnalysis = async () => {
+                if (loading || selectedFiles.length === 0) return;
+                setLoading(true);
+                const dbOpenReq = indexedDB.open(DB_NAME, DB_VERSION);
+                dbOpenReq.onsuccess = async (e) => {
+                    const db = e.target.result;
+                    for (const file of selectedFiles) {
+                        const imageId = `img_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+                        try {
+                            const txImg = db.transaction(STORE_IMAGES, "readwrite");
+                            txImg.objectStore(STORE_IMAGES).put({ 
+                                id: imageId, 
+                                data: file.base64, 
+                                alias: file.name.split('.')[0],
+                                originalFileName: file.name 
+                            });
+                            addLog(`Analyzing: ${file.name}...`, "process");
+                            const result = await fetchWithRetry({
+                                contents: [{ parts: [
+                                    { text: "Extract people's full names, readings (hiragana), and face positions [ymin, xmin, ymax, xmax] from this album page. Output JSON: {\"people\": [{\"name\": \"...\", \"reading\": \"...\", \"box_2d\": [...]}]}" },
+                                    { inlineData: { mimeType: "image/png", data: file.base64 } }
+                                ]}]
+                            });
+                            const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                            const parsed = JSON.parse(text.replace(/```json|```/g, ""));
+                            if (parsed.people) {
+                                const txPeople = db.transaction(STORE_PEOPLE, "readwrite");
+                                parsed.people.forEach(p => {
+                                    txPeople.objectStore(STORE_PEOPLE).add({
+                                        id: `p_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                                        name: p.name, reading: p.reading || "", memo: "", box: p.box_2d, imageId
+                                    });
+                                });
+                                addLog(`Imported ${parsed.people.length} members from ${file.name}`, "success");
+                            }
+                        } catch (err) { addLog(`Error: ${file.name} - ${err.message}`, "error"); }
+                    }
+                    loadDataFromDB(db);
+                    setSelectedFiles([]);
+                    setLoading(false);
+                };
+            };
+
+            const retryFailedImages = async () => {
+                if (loading) return;
+                const failedImages = Object.values(imagePool).filter(img => {
+                    const count = results.filter(p => p.imageId === img.id).length;
+                    return count === 0;
+                });
+
+                if (failedImages.length === 0) {
+                    addLog("再解析が必要な画像（0人の画像）は見つかりませんでした。", "info");
+                    return;
+                }
+
+                setLoading(true);
+                addLog(`${failedImages.length}件の未解析画像を再処理します...`, "process");
+
+                const dbOpenReq = indexedDB.open(DB_NAME, DB_VERSION);
+                dbOpenReq.onsuccess = async (e) => {
+                    const db = e.target.result;
+                    for (const img of failedImages) {
+                        try {
+                            addLog(`Retrying: ${img.alias}...`, "process");
+                            const result = await fetchWithRetry({
+                                contents: [{ parts: [
+                                    { text: "Extract people's full names, readings (hiragana), and face positions [ymin, xmin, ymax, xmax] from this album page. Output JSON: {\"people\": [{\"name\": \"...\", \"reading\": \"...\", \"box_2d\": [...]}]}" },
+                                    { inlineData: { mimeType: "image/png", data: img.data } }
+                                ]}]
+                            });
+                            const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                            const parsed = JSON.parse(text.replace(/```json|```/g, ""));
+                            if (parsed.people && parsed.people.length > 0) {
+                                const txPeople = db.transaction(STORE_PEOPLE, "readwrite");
+                                parsed.people.forEach(p => {
+                                    txPeople.objectStore(STORE_PEOPLE).add({
+                                        id: `p_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                                        name: p.name, reading: p.reading || "", memo: "", box: p.box_2d, imageId: img.id
+                                    });
+                                });
+                                addLog(`Re-imported ${parsed.people.length} members for ${img.alias}`, "success");
+                            } else {
+                                addLog(`${img.alias} からは人物が検出されませんでした。`, "warn");
+                            }
+                        } catch (err) { addLog(`Retry Error: ${img.alias} - ${err.message}`, "error"); }
+                    }
+                    loadDataFromDB(db);
+                    setLoading(false);
+                };
+            };
+
+            const updatePerson = (id, field, value) => {
+                const dbReq = indexedDB.open(DB_NAME, DB_VERSION);
+                dbReq.onsuccess = (e) => {
+                    const db = e.target.result;
+                    const tx = db.transaction(STORE_PEOPLE, "readwrite");
+                    const store = tx.objectStore(STORE_PEOPLE);
+                    store.get(id).onsuccess = (ev) => {
+                        const data = ev.target.result;
+                        if (!data) return;
+                        data[field] = value;
+                        store.put(data).onsuccess = () => setResults(prev => prev.map(p => p.id === id ? data : p));
+                    };
+                };
+            };
+
+            const updateImageAlias = (id, newAlias) => {
+                const dbReq = indexedDB.open(DB_NAME, DB_VERSION);
+                dbReq.onsuccess = (e) => {
+                    const db = e.target.result;
+                    const tx = db.transaction(STORE_IMAGES, "readwrite");
+                    const store = tx.objectStore(STORE_IMAGES);
+                    store.get(id).onsuccess = (ev) => {
+                        const data = ev.target.result;
+                        if (!data) return;
+                        data.alias = newAlias;
+                        store.put(data).onsuccess = () => {
+                            setImagePool(prev => ({ ...prev, [id]: data }));
+                            addLog(`Alias updated: ${newAlias}`, "info");
+                        };
+                    };
+                };
+            };
+
+            const deleteImage = (id) => {
+                if(!confirm("この画像と、紐付いている名簿データを削除しますか？")) return;
+                const dbReq = indexedDB.open(DB_NAME, DB_VERSION);
+                dbReq.onsuccess = (e) => {
+                    const db = e.target.result;
+                    db.transaction(STORE_IMAGES, "readwrite").objectStore(STORE_IMAGES).delete(id);
+                    const txPeople = db.transaction(STORE_PEOPLE, "readwrite");
+                    results.filter(p => p.imageId === id).forEach(p => txPeople.objectStore(STORE_PEOPLE).delete(p.id));
+                    txPeople.oncomplete = () => loadDataFromDB(db);
+                };
+            };
+
+            // [Version 5] Maintenance: Export
+            const exportData = () => {
+                const data = {
+                    images: Object.values(imagePool),
+                    people: results,
+                    exportDate: new Date().toISOString(),
+                    version: 5
+                };
+                const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `AlumniScanner_Export_${new Date().getTime()}.json`;
+                a.click();
+                addLog("Data exported successfully.", "success");
+            };
+
+            // [Version 5] Maintenance: Import
+            const importData = (file) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const imported = JSON.parse(e.target.result);
+                        if (!imported.images || !imported.people) throw new Error("Invalid format.");
+                        
+                        const dbReq = indexedDB.open(DB_NAME, DB_VERSION);
+                        dbReq.onsuccess = (ev) => {
+                            const db = ev.target.result;
+                            const txImg = db.transaction(STORE_IMAGES, "readwrite");
+                            imported.images.forEach(img => txImg.objectStore(STORE_IMAGES).put(img));
+                            
+                            const txPeople = db.transaction(STORE_PEOPLE, "readwrite");
+                            imported.people.forEach(p => txPeople.objectStore(STORE_PEOPLE).put(p));
+                            
+                            txPeople.oncomplete = () => {
+                                loadDataFromDB(db);
+                                addLog(`Imported ${imported.images.length} images and ${imported.people.length} records.`, "success");
+                            };
+                        };
+                    } catch (err) {
+                        addLog(`Import failed: ${err.message}`, "error");
+                    }
+                };
+                reader.readAsText(file);
+            };
+
+            const filteredAndSortedResults = useMemo(() => {
+                const q = searchQuery.toLowerCase();
+                let filtered = results.filter(p => {
+                    const img = imagePool[p.imageId];
+                    const alias = img?.alias?.toLowerCase() || "";
+                    const originalName = img?.originalFileName?.toLowerCase() || "";
+                    const name = p.name?.toLowerCase() || "";
+                    const reading = p.reading?.toLowerCase() || "";
+                    return name.includes(q) || reading.includes(q) || alias.includes(q) || originalName.includes(q);
+                });
+                return filtered.sort((a, b) => {
+                    if (sortMode === 'group') {
+                        const aliasA = imagePool[a.imageId]?.alias || "";
+                        const aliasB = imagePool[b.imageId]?.alias || "";
+                        if (aliasA !== aliasB) return aliasA.localeCompare(aliasB, 'ja');
+                    }
+                    return (a.reading || "ん").localeCompare(b.reading || "ん", 'ja');
+                });
+            }, [results, searchQuery, imagePool, sortMode]);
+
+            const FaceThumbnail = ({ base64, box }) => {
+                if (!base64 || !box) return <div className="w-full h-full bg-slate-100 flex items-center justify-center text-[10px] text-slate-300">No Image</div>;
+                const [ymin, xmin, ymax, xmax] = box;
+                const faceH = ymax - ymin, faceW = xmax - xmin;
+                const margin = 0.4;
+                const nYmin = Math.max(0, ymin - faceH * margin);
+                const nXmin = Math.max(0, xmin - faceW * margin);
+                const nYmax = Math.min(1000, ymax + faceH * margin);
+                const nXmax = Math.min(1000, xmax + faceW * margin);
+                const width = nXmax - nXmin, height = nYmax - nYmin;
+                return (
+                    <div className="w-full h-full overflow-hidden">
+                        <div style={{
+                            backgroundImage: `url(data:image/png;base64,${base64})`,
+                            backgroundSize: `${(1000 / width) * 100}% ${(1000 / height) * 100}%`,
+                            backgroundPosition: `${(nXmin / (1000 - width)) * 100}% ${(nYmin / (1000 - height)) * 100}%`,
+                            width: '100%', height: '100%', backgroundRepeat: 'no-repeat'
+                        }} />
+                    </div>
+                );
+            };
+
+            const failedCount = useMemo(() => {
+                return Object.keys(imagePool).filter(id => !results.some(p => p.imageId === id)).length;
+            }, [imagePool, results]);
+
+            return (
+                <div className="max-w-7xl mx-auto p-4 md:p-8 space-y-6">
+                    <header className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 flex flex-wrap justify-between items-center gap-6">
+                        <div className="flex items-center gap-4">
+                            <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white font-black text-xs">AS</div>
+                            <h1 className="text-xl font-black text-slate-900 tracking-tighter uppercase">Alumni <span className="text-indigo-600">Scanner</span></h1>
+                        </div>
+                        
+                        <div className="flex bg-slate-100 p-1 rounded-2xl">
+                            <button onClick={() => setViewMode('people')} className={`px-5 py-2 rounded-xl text-xs font-bold transition-all ${viewMode === 'people' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}>名簿</button>
+                            <button onClick={() => setViewMode('images')} className={`px-5 py-2 rounded-xl text-xs font-bold transition-all ${viewMode === 'images' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}>画像管理</button>
+                            <button onClick={() => setViewMode('maintenance')} className={`px-5 py-2 rounded-xl text-xs font-bold transition-all ${viewMode === 'maintenance' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}>メンテナンス</button>
+                        </div>
+
+                        <div className="flex gap-2 items-center flex-grow max-w-xl">
+                            <input type="text" placeholder="名前、読み、画像名で検索..." className="w-full px-5 py-2.5 bg-slate-50 rounded-2xl text-sm border border-slate-100" onChange={e => setSearchQuery(e.target.value)} />
+                            {/* [Version 6] 画像管理モード時のみ表示 */}
+                            {viewMode === 'images' && (customApiKey || API_KEY) && (
+                                <button onClick={() => fileInputRef.current.click()} className="px-5 py-2.5 bg-indigo-600 text-white rounded-2xl font-bold text-xs shrink-0 shadow-lg shadow-indigo-100">画像を追加</button>
+                            )}
+                            <input type="file" ref={fileInputRef} className="hidden" multiple onChange={e => {
+                                Array.from(e.target.files).forEach(file => {
+                                    const reader = new FileReader();
+                                    reader.onload = (ev) => setSelectedFiles(prev => [...prev, { base64: ev.target.result.split(',')[1], preview: ev.target.result, name: file.name }]);
+                                    reader.readAsDataURL(file);
+                                });
+                            }} />
+                        </div>
+                    </header>
+
+                    {/* [Version 6] 画像管理モード時のみ表示 */}
+                    {viewMode === 'images' && selectedFiles.length > 0 && (
+                        <div className="bg-white p-6 rounded-3xl border-2 border-dashed border-indigo-200 animate-in fade-in slide-in-from-top-4 duration-500">
+                            <div className="flex items-center justify-between mb-4">
+                                <h2 className="text-sm font-black text-indigo-900 uppercase tracking-widest">Selected Images ({selectedFiles.length})</h2>
+                                <div className="flex gap-2">
+                                    <button onClick={() => setSelectedFiles([])} className="px-4 py-2 text-xs font-bold text-slate-400">キャンセル</button>
+                                    <button onClick={runAnalysis} className="px-8 py-2.5 bg-indigo-600 text-white rounded-xl font-black text-sm shadow-xl shadow-indigo-200" disabled={loading}>
+                                        {loading ? '解析中...' : '解析を開始'}
+                                    </button>
+                                </div>
+                            </div>
+                            <div className="flex gap-3 overflow-x-auto pb-2 preview-scroll">
+                                {selectedFiles.map((file, idx) => (
+                                    <div key={idx} className="relative group shrink-0">
+                                        <img src={file.preview} className="w-24 h-24 object-cover rounded-2xl border border-slate-200" />
+                                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded-2xl flex items-center justify-center">
+                                            <button onClick={() => setSelectedFiles(prev => prev.filter((_, i) => i !== idx))} className="text-white text-[10px] font-bold">削除</button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {viewMode !== 'maintenance' && (
+                        <div className="flex items-center justify-between px-2">
+                            <div className="flex items-center gap-4">
+                                <button onClick={() => setSortMode('reading')} className={`text-[10px] font-bold ${sortMode === 'reading' ? 'text-indigo-600' : 'text-slate-400'}`}>ふりがな順</button>
+                                <button onClick={() => setSortMode('group')} className={`text-[10px] font-bold ${sortMode === 'group' ? 'text-indigo-600' : 'text-slate-400'}`}>グループ順</button>
+                                {viewMode === 'images' && failedCount > 0 && (
+                                    <button onClick={retryFailedImages} disabled={loading} className="px-3 py-1 bg-amber-100 text-amber-700 rounded-lg text-[10px] font-black uppercase hover:bg-amber-200 transition-colors">
+                                        {loading ? '再試行中...' : `未解析を再実行 (${failedCount})`}
+                                    </button>
+                                )}
+                            </div>
+                            <div className="text-[10px] font-bold text-slate-400">登録済み: {results.length} 名 / 画像: {Object.keys(imagePool).length} 枚</div>
+                        </div>
+                    )}
+
+                    {viewMode === 'people' ? (
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                            {filteredAndSortedResults.map(p => (
+                                <div key={p.id} className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
+                                    <div className="flex gap-4">
+                                        <div className="w-24 h-28 bg-slate-100 rounded-2xl overflow-hidden shrink-0 border border-slate-50">
+                                            <FaceThumbnail base64={imagePool[p.imageId]?.data} box={p.box} />
+                                        </div>
+                                        <div className="flex-grow min-w-0">
+                                            <div className="flex flex-col mb-1">
+                                                <span className="text-[9px] font-black text-indigo-500 uppercase tracking-tighter truncate">
+                                                    {imagePool[p.imageId]?.alias || imagePool[p.imageId]?.originalFileName || p.imageId}
+                                                </span>
+                                                <input 
+                                                    type="text" 
+                                                    className="text-[10px] font-bold text-slate-400 bg-transparent border-b border-transparent focus:border-indigo-300 focus:outline-none" 
+                                                    defaultValue={p.reading} 
+                                                    onBlur={e => updatePerson(p.id, 'reading', e.target.value)} 
+                                                    placeholder="読み不明"
+                                                />
+                                            </div>
+                                            <input 
+                                                type="text" 
+                                                className="font-bold text-slate-900 text-lg mb-2 w-full bg-transparent border-b border-transparent focus:border-indigo-300 focus:outline-none" 
+                                                defaultValue={p.name} 
+                                                onBlur={e => updatePerson(p.id, 'name', e.target.value)} 
+                                                placeholder="名前なし"
+                                            />
+                                            <textarea className="w-full bg-slate-50 rounded-xl text-[10px] p-2 h-14 resize-none border-none focus:ring-1 focus:ring-indigo-200" defaultValue={p.memo} onBlur={e => updatePerson(p.id, 'memo', e.target.value)} placeholder="メモを残す..." />
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    ) : viewMode === 'images' ? (
+                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
+                            {Object.values(imagePool).map(img => (
+                                <div key={img.id} className="bg-white p-3 rounded-3xl border border-slate-200 group">
+                                    <div className="relative aspect-square mb-3 overflow-hidden rounded-2xl border border-slate-100">
+                                        <img src={`data:image/png;base64,${img.data}`} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                                        <button onClick={() => deleteImage(img.id)} className="absolute top-2 right-2 p-2 bg-white/90 backdrop-blur rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-sm">
+                                            <svg className="w-3 h-3 text-rose-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M6 18L18 6M6 6l12 12" /></svg>
+                                        </button>
+                                        {results.filter(p => p.imageId === img.id).length === 0 && (
+                                            <div className="absolute bottom-2 left-2 px-2 py-1 bg-rose-500 text-white text-[8px] font-bold rounded-lg shadow-lg">未解析</div>
+                                        )}
+                                    </div>
+                                    <div className="px-1">
+                                        <div className="mb-2">
+                                            <label className="text-[8px] font-black text-slate-400 uppercase mb-0.5 block tracking-tighter">Alias (Click to Edit)</label>
+                                            <input 
+                                                type="text" 
+                                                className="w-full font-bold text-slate-800 text-xs bg-transparent border-b border-transparent focus:border-indigo-300 focus:outline-none" 
+                                                defaultValue={img.alias} 
+                                                onBlur={e => updateImageAlias(img.id, e.target.value)} 
+                                            />
+                                        </div>
+                                        <div className="mb-2">
+                                            <label className="text-[8px] font-black text-slate-400 uppercase mb-0.5 block tracking-tighter">Original Filename</label>
+                                            <div className="text-[9px] font-medium text-slate-500 truncate">{img.originalFileName || "Unknown"}</div>
+                                        </div>
+                                        <div className="mt-1 text-[9px] text-slate-400 font-bold">
+                                            {results.filter(p => p.imageId === img.id).length}人 検出済み
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    ) : (
+                        /* [Version 5] Maintenance View */
+                        <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-sm space-y-8 animate-in fade-in duration-300">
+                            <div>
+                                <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-4">API Key Configuration</h3>
+                                <div className="flex gap-4 items-center">
+                                    <input 
+                                        type="password" 
+                                        className="max-w-md w-full px-5 py-3 bg-slate-50 rounded-2xl text-sm border border-slate-100"
+                                        placeholder="Gemini API Key..."
+                                        value={customApiKey}
+                                        onChange={e => {
+                                            setCustomApiKey(e.target.value);
+                                            localStorage.setItem('AS_API_KEY', e.target.value);
+                                        }}
+                                    />
+                                    <button 
+                                        onClick={() => { setCustomApiKey(""); localStorage.removeItem('AS_API_KEY'); }} 
+                                        className="text-[10px] font-bold text-rose-500 underline"
+                                    >
+                                        クリア
+                                    </button>
+                                </div>
+                                <p className="mt-2 text-[10px] text-slate-400 font-medium leading-relaxed">
+                                    設定したAPIキーはブラウザにのみ保存されます。
+                                </p>
+                            </div>
+
+                            <div className="pt-8 border-t border-slate-100">
+                                <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-4">Database Operations</h3>
+                                <div className="flex gap-3">
+                                    <button onClick={exportData} className="px-6 py-3 bg-slate-900 text-white rounded-2xl font-black text-xs shadow-xl shadow-slate-200">
+                                        エクスポート (.json)
+                                    </button>
+                                    <button onClick={() => maintenanceInputRef.current.click()} className="px-6 py-3 bg-white text-slate-900 border border-slate-200 rounded-2xl font-black text-xs shadow-sm hover:bg-slate-50 transition-colors">
+                                        インポート
+                                    </button>
+                                    <input type="file" ref={maintenanceInputRef} className="hidden" accept=".json" onChange={e => {
+                                        if(e.target.files[0]) importData(e.target.files[0]);
+                                        e.target.value = "";
+                                    }} />
+                                </div>
+                            </div>
+
+                            <div className="pt-8 border-t border-slate-100">
+                                <h3 className="text-sm font-black text-rose-500 uppercase tracking-widest mb-4">Danger Zone</h3>
+                                <button onClick={() => {
+                                    if(confirm("全てのデータを初期化しますか？（元に戻せません）")) {
+                                        const dbReq = indexedDB.open(DB_NAME, DB_VERSION);
+                                        dbReq.onsuccess = (e) => {
+                                            const db = e.target.result;
+                                            const tx = db.transaction([STORE_IMAGES, STORE_PEOPLE], "readwrite");
+                                            tx.objectStore(STORE_IMAGES).clear();
+                                            tx.objectStore(STORE_PEOPLE).clear();
+                                            tx.oncomplete = () => window.location.reload();
+                                        };
+                                    }
+                                }} className="px-6 py-3 bg-rose-50 text-rose-600 border border-rose-100 rounded-2xl font-black text-xs">
+                                    データベースを全消去
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* [Version 6] 画像管理モード時のみ表示 */}
+                    {viewMode === 'images' && (
+                        <footer className="mt-8">
+                            <div className="bg-slate-900 rounded-3xl p-5 h-40 overflow-y-auto console-font text-emerald-500/80 border border-slate-800 shadow-2xl">
+                                <div className="flex items-center gap-2 mb-2 text-[9px] text-slate-500 font-bold border-b border-slate-800 pb-2">
+                                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                                    REALTIME SYSTEM LOG
+                                </div>
+                                {logs.map((l, i) => (
+                                    <div key={i} className="mb-1 flex gap-3">
+                                        <span className="text-slate-700">[{l.time || '--:--:--'}]</span>
+                                        <span className={l.type === 'error' ? 'text-rose-400' : l.type === 'warn' ? 'text-amber-400' : l.type === 'success' ? 'text-indigo-400' : ''}>{l.msg}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </footer>
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
