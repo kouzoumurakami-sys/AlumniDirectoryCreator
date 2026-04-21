@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Alumni Scanner G10 - Specification Fixed</title>
+    <title>Alumni Scanner</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -20,42 +20,29 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        /* version 7
-         * 【確定要件定義リスト】
-         * 1. APIモデル: gemini-3-flash-preview (変更不可)
-         * 2. サムネイル表示: 解析実行前にプレビューを必ず出す (必須)
-         * 3. 別名編集: 画像管理モードでalias編集可能にする (必須)
-         * 4. DB名: AlumniScanner_Normalized_DB (変更不可)
-         * 5. APIキー: 設定画面から入力（プログラム内埋め込みは空欄とする） (Version 6 変更)
-         * 6. 運用ルール: 今後の修正は、ロジック、HTML、インデント、変数名、メッセージなどプログラムの構成要素すべてにおいて、依頼内容以外の修正を行わないこと。
-         * 7. (金曜日時点の変更ピックアップ):
-         * - 顔認識のトリミングマージン調整 (margin = 0.4)
-         * - IndexedDBによる永続化の実装
-         * - ローカル画像プレビュー機能
-         * 8. (追加要件):
-         * - 解析失敗（0人）の画像のみを抽出して再解析する機能の追加
-         * 9. (不具合修正):
-         * - 顔写真のサムネイルが歪む（ストレッチされる）問題を修正
-         * 10. (機能追加):
-         * - 画像管理画面にて、AliasとともにOriginal Filename (Value.Id) を表示するように修正
-         * 11. (Version 3 変更点):
-         * - IndexedDBのimage保存時に originalFileName 属性を追加 (インポート時のファイル名)
-         * - 画像管理画面で Alias と originalFileName を併記 (ID表示を廃止)
-         * - 名簿画面の表示を Alias > originalFileName > Value.Id の優先順位で表示
-         * 12. (Version 4 変更点):
-         * - 名簿の名前とふりがなを編集可能に変更（onBlurによる実装）
-         * 13. (Version 5 変更点):
-         * - 管理者メンテナンス機能（インポート/エクスポート、APIキー動的設定）を追加
-         * - APIキー未設定時は解析・画像追加機能を非表示にする
-         * - 初回起動時の初期データ自動インポート機能を実装
-         * 14. (Version 6 変更点):
-         * - APIキーの埋め込み値を空欄に変更
-         * - 「画像を追加」ボタン、Selected Image欄、Log欄の表示を「画像管理モード」時のみに限定
-         * 15. (Version 7 変更点):
-         * - checkAndAutoImportメソッドにて initial_data.json からの自動インポート処理を実装 (GitHub Pages対応)
-         */
+        const { useState, useRef, useEffect, useMemo, memo } = React;
 
-        const { useState, useRef, useEffect, useMemo } = React;
+        /* [Version 10] 変更履歴データ（スクリプト直下のコメントから移行） */
+        const VERSION_HISTORY = [
+            "1. APIモデル: gemini-3-flash-preview (変更不可)",
+            "2. サムネイル表示: 解析実行前にプレビューを必ず出す (必須)",
+            "3. 別名編集: 画像管理モードでalias編集可能にする (必須)",
+            "4. DB名: AlumniScanner_Normalized_DB (変更不可)",
+            "5. APIキー: 設定画面から入力（プログラム内埋め込みは空欄とする） (Version 6 変更)",
+            "6. 運用ルール: 今後の修正は、ロジック、HTML、インデント、変数名、メッセージなどプログラムの構成要素すべてにおいて、依頼内容以外の修正を行わないこと。",
+            "7. (金曜日時点の変更ピックアップ): - 顔認識のトリミングマージン調整 (margin = 0.4) - IndexedDBによる永続化の実送 - ローカル画像プレビュー機能",
+            "8. (追加要件): - 解析失敗（0人）の画像のみを抽出して再解析する機能の追加",
+            "9. (不具合修正): - 顔写真のサムネイルが歪む（ストレッチされる）問題を修正",
+            "10. (機能追加): - 画像管理画面にて、AliasとともにOriginal Filename (Value.Id) を表示するように修正",
+            "11. (Version 3 変更点): - IndexedDBのimage保存時に originalFileName 属性を追加 - 画像管理画面で Alias と originalFileName を併記 - 名簿画面の表示を Alias > originalFileName > Value.Id の優先順位で表示",
+            "12. (Version 4 変更点): - 名簿の名前とふりがなを編集可能に変更（onBlurによる実装）",
+            "13. (Version 5 変更点): - 管理者メンテナンス機能（インポート/エクスポート、APIキー動的設定）を追加 - APIキー未設定時は解析・画像追加機能を非表示にする - 初回起動時の初期データ自動インポート機能を実装",
+            "14. (Version 6 変更点): - APIキーの埋め込み値を空欄に変更 - 「画像を追加」ボタン、Selected Image欄、Log欄の表示を「画像管理モード」時のみに限定",
+            "15. (Version 7 変更点): - checkAndAutoImportメソッドにて initial_data.json からの自動インポート処理を実装 (GitHub Pages対応)",
+            "16. (Version 8 変更点): - checkAndAutoImportメソッドにて、外部fetchを廃止し内部定数 INITIAL_DATA からの自動インポートに変更 (配布用シングルファイル化対応)",
+            "17. (Version 9 変更点): - パフォーマンス最適化: 検索入力欄の分離（300msデバウンス）、名簿カードのメモ化、ソート済みインデックスの導入。",
+            "18. (Version 10 変更点): - 初期データインポート時の確認ダイアログ追加、変更履歴ダイアログの実装、Titleタグ変更。"
+        ];
 
         // [FIXED] API KEY: メンテナンス機能導入に伴い空欄化
         const API_KEY = ""; 
@@ -73,6 +60,95 @@
         const STORE_IMAGES = "images"; 
         const STORE_PEOPLE = "people"; 
 
+        // [Version 8] 初期インポート用データ定数
+        const INITIAL_DATA = {
+            images: [], // { id, data, alias, originalFileName } の配列
+            people: []  // { id, name, reading, memo, box, imageId } の配列
+        };
+
+        // [Version 9] 入力欄の分離とデバウンス用コンポーネント
+        const SearchBar = ({ onSearch }) => {
+            const [localQuery, setLocalQuery] = useState("");
+            const timerRef = useRef(null);
+
+            const handleChange = (e) => {
+                const val = e.target.value;
+                setLocalQuery(val);
+                if (timerRef.current) clearTimeout(timerRef.current);
+                timerRef.current = setTimeout(() => {
+                    onSearch(val);
+                }, 300);
+            };
+
+            return (
+                <input 
+                    type="text" 
+                    placeholder="名前、読み、画像名で検索..." 
+                    className="w-full px-5 py-2.5 bg-slate-50 rounded-2xl text-sm border border-slate-100" 
+                    value={localQuery}
+                    onChange={handleChange} 
+                />
+            );
+        };
+
+        // [Version 9] 名簿カードのメモ化
+        const PersonCard = memo(({ p, imgData, updatePerson }) => {
+            return (
+                <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
+                    <div className="flex gap-4">
+                        <div className="w-24 h-28 bg-slate-100 rounded-2xl overflow-hidden shrink-0 border border-slate-50">
+                            <FaceThumbnail base64={imgData?.data} box={p.box} />
+                        </div>
+                        <div className="flex-grow min-w-0">
+                            <div className="flex flex-col mb-1">
+                                <span className="text-[9px] font-black text-indigo-500 uppercase tracking-tighter truncate">
+                                    {imgData?.alias || imgData?.originalFileName || p.imageId}
+                                </span>
+                                <input 
+                                    type="text" 
+                                    className="text-[10px] font-bold text-slate-400 bg-transparent border-b border-transparent focus:border-indigo-300 focus:outline-none" 
+                                    defaultValue={p.reading} 
+                                    onBlur={e => updatePerson(p.id, 'reading', e.target.value)} 
+                                    placeholder="読み不明"
+                                />
+                            </div>
+                            <input 
+                                type="text" 
+                                className="font-bold text-slate-900 text-lg mb-2 w-full bg-transparent border-b border-transparent focus:border-indigo-300 focus:outline-none" 
+                                defaultValue={p.name} 
+                                onBlur={e => updatePerson(p.id, 'name', e.target.value)} 
+                                placeholder="名前なし"
+                            />
+                            <textarea className="w-full bg-slate-50 rounded-xl text-[10px] p-2 h-14 resize-none border-none focus:ring-1 focus:ring-indigo-200" defaultValue={p.memo} onBlur={e => updatePerson(p.id, 'memo', e.target.value)} placeholder="メモを残す..." />
+                        </div>
+                    </div>
+                </div>
+            );
+        });
+
+        // [Version 9] 共通部品の抽出 (FaceThumbnail)
+        const FaceThumbnail = ({ base64, box }) => {
+            if (!base64 || !box) return <div className="w-full h-full bg-slate-100 flex items-center justify-center text-[10px] text-slate-300">No Image</div>;
+            const [ymin, xmin, ymax, xmax] = box;
+            const faceH = ymax - ymin, faceW = xmax - xmin;
+            const margin = 0.4;
+            const nYmin = Math.max(0, ymin - faceH * margin);
+            const nXmin = Math.max(0, xmin - faceW * margin);
+            const nYmax = Math.min(1000, ymax + faceH * margin);
+            const nXmax = Math.min(1000, xmax + faceW * margin);
+            const width = nXmax - nXmin, height = nYmax - nYmin;
+            return (
+                <div className="w-full h-full overflow-hidden">
+                    <div style={{
+                        backgroundImage: `url(data:image/png;base64,${base64})`,
+                        backgroundSize: `${(1000 / width) * 100}% ${(1000 / height) * 100}%`,
+                        backgroundPosition: `${(nXmin / (1000 - width)) * 100}% ${(nYmin / (1000 - height)) * 100}%`,
+                        width: '100%', height: '100%', backgroundRepeat: 'no-repeat'
+                    }} />
+                </div>
+            );
+        };
+
         const App = () => {
             const [results, setResults] = useState([]);
             const [imagePool, setImagePool] = useState({}); 
@@ -84,6 +160,8 @@
             const [sortMode, setSortMode] = useState('reading'); 
             // [Version 5] UI State
             const [customApiKey, setCustomApiKey] = useState(localStorage.getItem('AS_API_KEY') || "");
+            // [Version 10] 履歴ダイアログ用State
+            const [showHistory, setShowHistory] = useState(false);
             
             const fileInputRef = useRef(null);
             const maintenanceInputRef = useRef(null);
@@ -105,28 +183,28 @@
                 };
             };
 
-            // [Version 5 & 7] 初期データ自動インポート機能 (initial_data.json対応)
+            // [Version 8] 初期データ自動インポート機能 (内部定数参照型)
             const checkAndAutoImport = async (db) => {
                 const tx = db.transaction([STORE_IMAGES], "readonly");
                 tx.objectStore(STORE_IMAGES).count().onsuccess = async (e) => {
                     if (e.target.result === 0) {
-                        addLog("No data found. Checking for initial_data.json...", "info");
-                        // [Version 7] 同ディレクトリの initial_data.json を取得して自動インポート
+                        addLog("No data found. Checking for INITIAL_DATA constant...", "info");
                         try {
-                            const response = await fetch('initial_data.json');
-                            if (!response.ok) {
-                                addLog("initial_data.json not found. Skipping auto-import.", "info");
-                                return;
-                            }
-                            const imported = await response.json();
-                            if (imported.images && imported.people) {
+                            if (INITIAL_DATA && INITIAL_DATA.images && INITIAL_DATA.images.length > 0) {
+                                // [Version 10] インポート前に確認ダイアログを表示
+                                if (!confirm("初期データが見つかりました。インポートしますか？")) {
+                                    addLog("Import cancelled by user.", "info");
+                                    return;
+                                }
                                 const writeTx = db.transaction([STORE_IMAGES, STORE_PEOPLE], "readwrite");
-                                imported.images.forEach(img => writeTx.objectStore(STORE_IMAGES).put(img));
-                                imported.people.forEach(p => writeTx.objectStore(STORE_PEOPLE).put(p));
+                                INITIAL_DATA.images.forEach(img => writeTx.objectStore(STORE_IMAGES).put(img));
+                                INITIAL_DATA.people.forEach(p => writeTx.objectStore(STORE_PEOPLE).put(p));
                                 writeTx.oncomplete = () => {
                                     loadDataFromDB(db);
-                                    addLog(`Auto-imported ${imported.images.length} images and ${imported.people.length} records.`, "success");
+                                    addLog(`Auto-imported ${INITIAL_DATA.images.length} images and ${INITIAL_DATA.people.length} records from internal data.`, "success");
                                 };
+                            } else {
+                                addLog("INITIAL_DATA is empty. Ready for new data.", "info");
                             }
                         } catch (err) {
                             addLog(`Auto-import failed: ${err.message}`, "error");
@@ -151,7 +229,6 @@
             }, []);
 
             const fetchWithRetry = async (payload, maxRetries = 5) => {
-                // [Version 5] 動的APIキー優先
                 const activeKey = customApiKey || API_KEY;
                 const dynamicUrl = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_ID}:generateContent?key=${activeKey}`;
                 
@@ -309,7 +386,6 @@
                 };
             };
 
-            // [Version 5] Maintenance: Export
             const exportData = () => {
                 const data = {
                     images: Object.values(imagePool),
@@ -326,7 +402,6 @@
                 addLog("Data exported successfully.", "success");
             };
 
-            // [Version 5] Maintenance: Import
             const importData = (file) => {
                 const reader = new FileReader();
                 reader.onload = (e) => {
@@ -355,7 +430,22 @@
                 reader.readAsText(file);
             };
 
+            const preSortedIndices = useMemo(() => {
+                const base = [...results];
+                const byReading = [...base].sort((a, b) => (a.reading || "ん").localeCompare(b.reading || "ん", 'ja'));
+                const byGroup = [...base].sort((a, b) => {
+                    const aliasA = imagePool[a.imageId]?.alias || "";
+                    const aliasB = imagePool[b.imageId]?.alias || "";
+                    if (aliasA !== aliasB) return aliasA.localeCompare(aliasB, 'ja');
+                    return (a.reading || "ん").localeCompare(b.reading || "ん", 'ja');
+                });
+                return { reading: byReading, group: byGroup };
+            }, [results, imagePool]);
+
             const filteredAndSortedResults = useMemo(() => {
+                if (!searchQuery) {
+                    return sortMode === 'group' ? preSortedIndices.group : preSortedIndices.reading;
+                }
                 const q = searchQuery.toLowerCase();
                 let filtered = results.filter(p => {
                     const img = imagePool[p.imageId];
@@ -373,29 +463,7 @@
                     }
                     return (a.reading || "ん").localeCompare(b.reading || "ん", 'ja');
                 });
-            }, [results, searchQuery, imagePool, sortMode]);
-
-            const FaceThumbnail = ({ base64, box }) => {
-                if (!base64 || !box) return <div className="w-full h-full bg-slate-100 flex items-center justify-center text-[10px] text-slate-300">No Image</div>;
-                const [ymin, xmin, ymax, xmax] = box;
-                const faceH = ymax - ymin, faceW = xmax - xmin;
-                const margin = 0.4;
-                const nYmin = Math.max(0, ymin - faceH * margin);
-                const nXmin = Math.max(0, xmin - faceW * margin);
-                const nYmax = Math.min(1000, ymax + faceH * margin);
-                const nXmax = Math.min(1000, xmax + faceW * margin);
-                const width = nXmax - nXmin, height = nYmax - nYmin;
-                return (
-                    <div className="w-full h-full overflow-hidden">
-                        <div style={{
-                            backgroundImage: `url(data:image/png;base64,${base64})`,
-                            backgroundSize: `${(1000 / width) * 100}% ${(1000 / height) * 100}%`,
-                            backgroundPosition: `${(nXmin / (1000 - width)) * 100}% ${(nYmin / (1000 - height)) * 100}%`,
-                            width: '100%', height: '100%', backgroundRepeat: 'no-repeat'
-                        }} />
-                    </div>
-                );
-            };
+            }, [results, searchQuery, imagePool, sortMode, preSortedIndices]);
 
             const failedCount = useMemo(() => {
                 return Object.keys(imagePool).filter(id => !results.some(p => p.imageId === id)).length;
@@ -404,7 +472,10 @@
             return (
                 <div className="max-w-7xl mx-auto p-4 md:p-8 space-y-6">
                     <header className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 flex flex-wrap justify-between items-center gap-6">
-                        <div className="flex items-center gap-4">
+                        <div 
+                            className="flex items-center gap-4 cursor-help group"
+                            onClick={() => setShowHistory(true)}
+                        >
                             <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white font-black text-xs">AS</div>
                             <h1 className="text-xl font-black text-slate-900 tracking-tighter uppercase">Alumni <span className="text-indigo-600">Scanner</span></h1>
                         </div>
@@ -416,8 +487,7 @@
                         </div>
 
                         <div className="flex gap-2 items-center flex-grow max-w-xl">
-                            <input type="text" placeholder="名前、読み、画像名で検索..." className="w-full px-5 py-2.5 bg-slate-50 rounded-2xl text-sm border border-slate-100" onChange={e => setSearchQuery(e.target.value)} />
-                            {/* [Version 6] 画像管理モード時のみ表示 */}
+                            <SearchBar onSearch={setSearchQuery} />
                             {viewMode === 'images' && (customApiKey || API_KEY) && (
                                 <button onClick={() => fileInputRef.current.click()} className="px-5 py-2.5 bg-indigo-600 text-white rounded-2xl font-bold text-xs shrink-0 shadow-lg shadow-indigo-100">画像を追加</button>
                             )}
@@ -431,7 +501,29 @@
                         </div>
                     </header>
 
-                    {/* [Version 6] 画像管理モード時のみ表示 */}
+                    {/* [Version 10] 変更履歴モーダル */}
+                    {showHistory && (
+                        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div className="bg-white w-full max-w-2xl max-h-[80vh] rounded-3xl shadow-2xl overflow-hidden flex flex-col">
+                                <div className="p-6 border-b border-slate-100 flex justify-between items-center">
+                                    <h2 className="text-lg font-black text-slate-900 uppercase tracking-tighter">【確定要件定義リスト】 & 更新履歴</h2>
+                                    <button onClick={() => setShowHistory(false)} className="w-8 h-8 flex items-center justify-center bg-slate-100 rounded-full text-slate-500 hover:text-slate-900">&times;</button>
+                                </div>
+                                <div className="p-6 overflow-y-auto space-y-3">
+                                    {VERSION_HISTORY.map((item, idx) => (
+                                        <div key={idx} className="flex gap-4 items-start text-xs leading-relaxed text-slate-600">
+                                            <span className="w-4 h-4 mt-0.5 rounded-full bg-indigo-50 flex-shrink-0 flex items-center justify-center text-[8px] font-bold text-indigo-500">•</span>
+                                            {item}
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="p-4 bg-slate-50 text-center">
+                                    <button onClick={() => setShowHistory(false)} className="px-8 py-2 bg-indigo-600 text-white text-xs font-bold rounded-xl shadow-lg shadow-indigo-200">閉じる</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     {viewMode === 'images' && selectedFiles.length > 0 && (
                         <div className="bg-white p-6 rounded-3xl border-2 border-dashed border-indigo-200 animate-in fade-in slide-in-from-top-4 duration-500">
                             <div className="flex items-center justify-between mb-4">
@@ -474,35 +566,12 @@
                     {viewMode === 'people' ? (
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
                             {filteredAndSortedResults.map(p => (
-                                <div key={p.id} className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
-                                    <div className="flex gap-4">
-                                        <div className="w-24 h-28 bg-slate-100 rounded-2xl overflow-hidden shrink-0 border border-slate-50">
-                                            <FaceThumbnail base64={imagePool[p.imageId]?.data} box={p.box} />
-                                        </div>
-                                        <div className="flex-grow min-w-0">
-                                            <div className="flex flex-col mb-1">
-                                                <span className="text-[9px] font-black text-indigo-500 uppercase tracking-tighter truncate">
-                                                    {imagePool[p.imageId]?.alias || imagePool[p.imageId]?.originalFileName || p.imageId}
-                                                </span>
-                                                <input 
-                                                    type="text" 
-                                                    className="text-[10px] font-bold text-slate-400 bg-transparent border-b border-transparent focus:border-indigo-300 focus:outline-none" 
-                                                    defaultValue={p.reading} 
-                                                    onBlur={e => updatePerson(p.id, 'reading', e.target.value)} 
-                                                    placeholder="読み不明"
-                                                />
-                                            </div>
-                                            <input 
-                                                type="text" 
-                                                className="font-bold text-slate-900 text-lg mb-2 w-full bg-transparent border-b border-transparent focus:border-indigo-300 focus:outline-none" 
-                                                defaultValue={p.name} 
-                                                onBlur={e => updatePerson(p.id, 'name', e.target.value)} 
-                                                placeholder="名前なし"
-                                            />
-                                            <textarea className="w-full bg-slate-50 rounded-xl text-[10px] p-2 h-14 resize-none border-none focus:ring-1 focus:ring-indigo-200" defaultValue={p.memo} onBlur={e => updatePerson(p.id, 'memo', e.target.value)} placeholder="メモを残す..." />
-                                        </div>
-                                    </div>
-                                </div>
+                                <PersonCard 
+                                    key={p.id} 
+                                    p={p} 
+                                    imgData={imagePool[p.imageId]} 
+                                    updatePerson={updatePerson} 
+                                />
                             ))}
                         </div>
                     ) : viewMode === 'images' ? (
@@ -540,7 +609,6 @@
                             ))}
                         </div>
                     ) : (
-                        /* [Version 5] Maintenance View */
                         <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-sm space-y-8 animate-in fade-in duration-300">
                             <div>
                                 <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-4">API Key Configuration</h3>
@@ -603,7 +671,6 @@
                         </div>
                     )}
 
-                    {/* [Version 6] 画像管理モード時のみ表示 */}
                     {viewMode === 'images' && (
                         <footer className="mt-8">
                             <div className="bg-slate-900 rounded-3xl p-5 h-40 overflow-y-auto console-font text-emerald-500/80 border border-slate-800 shadow-2xl">
